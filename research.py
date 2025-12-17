@@ -22,7 +22,7 @@ try:
 except ImportError:
     pd = None
 
-# Problematic packages are optional
+# Optional packages
 try:
     import pytesseract
 except ImportError:
@@ -42,7 +42,7 @@ except ImportError:
 # CONFIG
 # =========================
 
-# Streamlit Cloud writeable folder
+# Writeable folder for Streamlit Cloud
 DATA_DIR = os.path.join(os.getcwd(), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -280,8 +280,23 @@ def run_web_interface():
         st.subheader("Admin Panel")
         conn = db_connection(USERS_DB)
         df_users = pd.read_sql("SELECT * FROM users", conn)
-        conn.close()
         st.dataframe(df_users)
+
+        st.markdown("---")
+        st.subheader("Change user password")
+        user_to_change = st.text_input("Username to change password")
+        new_pass = st.text_input("New password", type="password")
+        if st.button("Update Password"):
+            if user_to_change and new_pass:
+                c = conn.cursor()
+                c.execute("UPDATE users SET password=? WHERE username=?", (new_pass, user_to_change))
+                conn.commit()
+                st.success(f"Password updated for {user_to_change}")
+                df_users = pd.read_sql("SELECT * FROM users", conn)
+                st.dataframe(df_users)
+            else:
+                st.warning("Enter username and new password")
+        conn.close()
 
     seed = st.text_input("Seed URL", "https://www.gov.rs/")
     if st.button("Start Crawl"):
@@ -335,4 +350,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
