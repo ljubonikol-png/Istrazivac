@@ -10,21 +10,43 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from warcio.warcwriter import WARCWriter
 from io import BytesIO
-import csv
-import json
-import glob
+
+# Try/except za pakete koji prave problem na Cloud-u
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
+
+try:
+    from PySide6 import QtWidgets
+except ImportError:
+    QtWidgets = None
+
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
+
+# Streamlit import
+try:
+    import streamlit as st
+except ImportError:
+    st = None
 
 # =========================
 # CONFIG
 # =========================
+
 ROOT = r"E:\GarbageMan"
 DB_PATH = os.path.join(ROOT, "crawler.db")
 WARC_PATH = os.path.join(ROOT, "archive.warc.gz")
 PAYLOAD_DIR = os.path.join(ROOT, "payloads")
 OUTPUT_DIR = os.path.join(ROOT, "output")
-USERS_DB = os.path.join(ROOT, "users.db")
 
-SEED_URLS = ["https://www.gov.rs/"]
+SEED_URLS = [
+    "https://www.gov.rs/",
+]
+
 MAX_DEPTH = 2
 THREADS = 4
 TIMEOUT = 20
@@ -36,17 +58,14 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # =========================
 # LOGGING
 # =========================
-log_file = os.path.join(ROOT, "crawler.log")
+
 def log(msg):
-    timestamp = time.strftime("[%H:%M:%S]")
-    line = f"{timestamp} {msg}"
-    print(line, flush=True)
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    print(time.strftime("[%H:%M:%S]"), msg, flush=True)
 
 # =========================
 # DATABASE
 # =========================
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -68,7 +87,9 @@ def db_connection():
 # =========================
 # NETWORK (TLS-ROBUST)
 # =========================
-warnings.simplefilter("ignore", requests.packages.urllib3.exceptions.InsecureRequestWarning)
+
+warnings.simplefilter("ignore")
+
 session = requests.Session()
 session.headers.update({"User-Agent": USER_AGENT})
 
@@ -83,12 +104,14 @@ def fetch(url):
 # =========================
 # HASHING
 # =========================
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 # =========================
 # WARC (THREAD SAFE)
 # =========================
+
 warc_lock = threading.Lock()
 warc_file = open(WARC_PATH, "ab")
 warc_writer = WARCWriter(warc_file, gzip=True)
@@ -101,6 +124,7 @@ def write_warc(url, payload: bytes):
 # =========================
 # CRAWLER CORE
 # =========================
+
 task_queue = queue.Queue()
 seen_lock = threading.Lock()
 
@@ -109,21 +133,30 @@ def process_url(url, depth, conn):
     c.execute("SELECT 1 FROM seen WHERE url=?", (url,))
     if c.fetchone():
         return
+
     log(f"fetching d={depth} {url}")
+
     data, ctype = fetch(url)
     if not data:
         return
+
     h = sha256(data)
+
     with seen_lock:
         c.execute("INSERT OR IGNORE INTO seen(url, hash) VALUES (?,?)", (url, h))
         conn.commit()
+
     with open(os.path.join(PAYLOAD_DIR, h), "wb") as f:
         f.write(data)
+
     write_warc(url, data)
+
     if depth >= MAX_DEPTH:
         return
+
     if "html" not in (ctype or "").lower():
         return
+
     try:
         soup = BeautifulSoup(data, "lxml")
         for a in soup.find_all("a", href=True):
@@ -149,169 +182,98 @@ def worker():
 # =========================
 # EXPORT
 # =========================
-def export_seen():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT url, hash FROM seen")
-    rows = c.fetchall()
-    conn.close()
-    csv_file = os.path.join(OUTPUT_DIR, "seen.csv")
-    with open(csv_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["url", "hash"])
-        writer.writerows(rows)
-    log(f"CSV export zavrsen: {csv_file}")
-    json_file = os.path.join(OUTPUT_DIR, "seen.json")
-    with open(json_file, "w", encoding="utf-8") as f:
-        json.dump([{"url": u, "hash": h} for u, h in rows], f, indent=2)
-    log(f"JSON export zavrsen: {json_file}")
+
+def export_csv_json():
+    conn = db_connection()
+    df = None
+    try:
+        import pandas as pd
+        df = pd.read_sql_query("SELECT * FROM seen", conn)
+        csv_path = os.path.join(OUTPUT_DIR, "seen.csv")
+        json_path = os.path.join(OUTPUT_DIR, "seen.json")
+        df.to_csv(csv_path, index=False)
+        df.to_json(json_path, orient="records")
+        log(f"CSV export zavrsen: {csv_path}")
+        log(f"JSON export zavrsen: {json_path}")
+    except Exception as e:
+        log(f"export error: {e}")
+    finally:
+        conn.close()
 
 # =========================
-# USERS DB
+# STREAMLIT INTERFACE
 # =========================
-def init_users_db():
-    conn = sqlite3.connect(USERS_DB)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password TEXT,
-            premium INTEGER DEFAULT 0
-        )
-    """)
-    c.execute("INSERT OR IGNORE INTO users(username, password, premium) VALUES (?, ?, ?)", ("freeuser","freepass",0))
-    c.execute("INSERT OR IGNORE INTO users(username, password, premium) VALUES (?, ?, ?)", ("premiumuser","1234",1))
-    conn.commit()
-    conn.close()
+
+def run_web_interface():
+    if st is None:
+        print("Streamlit not installed. Running offline mode only.")
+        return
+
+    if 'crawl_count' not in st.session_state:
+        st.session_state.crawl_count = 0
+    if 'premium_status' not in st.session_state:
+        st.session_state.premium_status = False
+
+    st.title("GarbageMan Web Crawler")
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    premium_users = {"premiumuser": "1234"}
+    free_users = {"freeuser": "freepass"}
+
+    login = st.button("Login")
+
+    if login:
+        if username in premium_users and password == premium_users[username]:
+            st.session_state.premium_status = True
+            st.success("Premium login successful!")
+        elif username in free_users and password == free_users[username]:
+            st.session_state.premium_status = False
+            st.success("Free login successful!")
+        else:
+            st.error("Invalid credentials")
+
+    if st.session_state.premium_status is not None:
+        if not st.session_state.premium_status and st.session_state.crawl_count >= 2:
+            st.warning("Free user limit reached")
+        else:
+            seed = st.text_input("Seed URL", "https://www.gov.rs/")
+            if st.button("Start Crawl"):
+                st.session_state.crawl_count += 1
+                task_queue.put((seed, 0))
+                threads = []
+                for _ in range(THREADS):
+                    t = threading.Thread(target=worker, daemon=True)
+                    t.start()
+                    threads.append(t)
+                task_queue.join()
+                export_csv_json()
+                st.success("Crawl complete!")
 
 # =========================
 # MAIN
 # =========================
+
 def main():
     log("initializing database")
     init_db()
-    log("seeding crawl")
-    for u in SEED_URLS:
-        task_queue.put((u, 0))
-    log("starting workers")
-    threads = []
-    for _ in range(THREADS):
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        threads.append(t)
-    task_queue.join()
-    warc_file.close()
-    export_seen()
-    log("crawl complete")
 
-# =========================
-# STREAMLIT WEB INTERFACE
-# =========================
-def run_web_interface():
-    try:
-        import streamlit as st
-        import threading
-        import pandas as pd
-        import base64
-
-        st.title("GarbageMan Web Archiver")
-
-        # =========================
-        # LOGIN
-        # =========================
-        premium_status = False
-        username = st.text_input("Korisničko ime")
-        password = st.text_input("Lozinka", type="password")
-
-        if username and password:
-            conn = sqlite3.connect(USERS_DB)
-            c = conn.cursor()
-            c.execute("SELECT premium FROM users WHERE username=? AND password=?", (username, password))
-            row = c.fetchone()
-            conn.close()
-
-            if not row:
-                st.warning("Pogrešno korisničko ime ili lozinka")
-                st.stop()
-            else:
-                premium_status = bool(row[0])
-                st.success(f"Prijavljen kao {username} | {'Premium' if premium_status else 'Free'}")
-        else:
-            st.stop()
-
-        # =========================
-        # CRAWL PARAMS
-        # =========================
-        url = st.text_input("Unesi URL za arhiviranje", value=SEED_URLS[0])
-        depth = st.slider("Dubina pretrage", 1, 5, value=MAX_DEPTH)
-
-        if "crawl_count" not in st.session_state:
-            st.session_state.crawl_count = 0
-
-        if not premium_status and st.session_state.crawl_count >= 2:
-            st.warning("Dostigli ste limit broja crawl-ova po sesiji. Platite pretplatu za više.")
-            st.stop()
-
-        if st.button("Pokreni Crawl"):
-            if not premium_status:
-                st.session_state.crawl_count += 1
-            st.write(f"Pokrećem crawl broj {st.session_state.crawl_count if not premium_status else 'Unlimited'} za {username}")
-            def crawl_thread():
-                global SEED_URLS, MAX_DEPTH
-                SEED_URLS = [url]
-                MAX_DEPTH = depth
-                main()
-            t = threading.Thread(target=crawl_thread, daemon=True)
-            t.start()
-            st.success("Crawl pokrenut!")
-
-        # =========================
-        # DOWNLOAD BUTTONS
-        # =========================
-        st.write("Folder output sadrži: seen.csv, seen.json i log fajl.")
-        st.write("Klikni na dugme da preuzmeš fajlove:")
-        def make_download_button(file_path, label):
-            with open(file_path, "rb") as f:
-                data = f.read()
-            b64 = base64.b64encode(data).decode()
-            href = f'<a href="data:application/octet-stream;base64,{b64}" download="{os.path.basename(file_path)}">{label}</a>'
-            st.markdown(href, unsafe_allow_html=True)
-
-        for file_path in glob.glob(os.path.join(OUTPUT_DIR, "*")):
-            make_download_button(file_path, f"Preuzmi {os.path.basename(file_path)}")
-        if os.path.exists(WARC_PATH):
-            make_download_button(WARC_PATH, f"Preuzmi {os.path.basename(WARC_PATH)}")
-
-        # =========================
-        # SEARCH FILTER
-        # =========================
-        st.write("Pretraga fajlova u CSV/JSON:")
-        search_query = st.text_input("Pretraži URL ili hash")
-        if search_query:
-            csv_file = os.path.join(OUTPUT_DIR, "seen.csv")
-            if os.path.exists(csv_file):
-                df = pd.read_csv(csv_file)
-                filtered = df[df["url"].str.contains(search_query, case=False, na=False) |
-                              df["hash"].str.contains(search_query, case=False, na=False)]
-                st.write(f"Pronađeno {len(filtered)} rezultata:")
-                st.dataframe(filtered)
-                if st.button("Preuzmi filtrirane rezultate kao CSV"):
-                    filtered_csv_path = os.path.join(OUTPUT_DIR, f"filtered_{int(time.time())}.csv")
-                    filtered.to_csv(filtered_csv_path, index=False)
-                    make_download_button(filtered_csv_path, f"Preuzmi filtrirani CSV")
-            else:
-                st.write("CSV fajl ne postoji. Pokreni crawl prvo.")
-
-    except ImportError:
-        print("Streamlit nije instaliran. Instaliraj preko 'pip install streamlit'.")
-
-# =========================
-# START SCRIPT
-# =========================
-if __name__ == "__main__":
-    init_users_db()
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "web":
+    if st is not None:
         run_web_interface()
     else:
-        main()
+        log("running offline crawl")
+        for u in SEED_URLS:
+            task_queue.put((u, 0))
+        threads = []
+        for _ in range(THREADS):
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+            threads.append(t)
+        task_queue.join()
+        export_csv_json()
+        warc_file.close()
+        log("offline crawl complete")
+
+if __name__ == "__main__":
+    main()
