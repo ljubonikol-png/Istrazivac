@@ -42,21 +42,24 @@ except ImportError:
 # CONFIG
 # =========================
 
-ROOT = r"E:\GarbageMan"
-DB_PATH = os.path.join(ROOT, "crawler.db")
-WARC_PATH = os.path.join(ROOT, "archive.warc.gz")
-PAYLOAD_DIR = os.path.join(ROOT, "payloads")
-OUTPUT_DIR = os.path.join(ROOT, "output")
-USERS_DB = os.path.join(ROOT, "users.db")
+# Streamlit Cloud writeable folder
+DATA_DIR = os.path.join(os.getcwd(), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+DB_PATH = os.path.join(DATA_DIR, "crawler.db")
+USERS_DB = os.path.join(DATA_DIR, "users.db")
+WARC_PATH = os.path.join(DATA_DIR, "archive.warc.gz")
+PAYLOAD_DIR = os.path.join(DATA_DIR, "payloads")
+OUTPUT_DIR = os.path.join(DATA_DIR, "output")
+
+os.makedirs(PAYLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 SEED_URLS = ["https://www.gov.rs/"]
 MAX_DEPTH = 2
 THREADS = 4
 TIMEOUT = 20
 USER_AGENT = "GarbageMan/1.0 (archival crawler; TLS relaxed)"
-
-os.makedirs(PAYLOAD_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # =========================
 # LOGGING
@@ -94,7 +97,7 @@ def init_users_db():
             created_at TEXT
         )
     """)
-    # Ensure default admin
+    # Default admin
     c.execute("SELECT 1 FROM users WHERE username='admin'")
     if not c.fetchone():
         c.execute(
@@ -233,7 +236,7 @@ def authenticate(username, password):
     c.execute("SELECT role, crawl_count FROM users WHERE username=? AND password=?", (username, password))
     row = c.fetchone()
     conn.close()
-    return row  # (role, crawl_count) or None
+    return row
 
 def increment_crawl(username):
     conn = db_connection(USERS_DB)
@@ -279,7 +282,6 @@ def run_web_interface():
         df_users = pd.read_sql("SELECT * FROM users", conn)
         conn.close()
         st.dataframe(df_users)
-        # Additional admin actions can be added here
 
     seed = st.text_input("Seed URL", "https://www.gov.rs/")
     if st.button("Start Crawl"):
