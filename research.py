@@ -102,7 +102,7 @@ def init_users_db():
     if not c.fetchone():
         c.execute(
             "INSERT INTO users VALUES (?,?,?,?,?)",
-            ("admin", "admin123", "admin", 0, time.ctime())
+            ("admin", "MiraAndjaDiki.,.,1234567890,.,.", "admin", 0, time.ctime())
         )
     # Example free and premium users
     for u, p, r in [("freeuser","freepass","free"), ("premiumuser","1234","premium")]:
@@ -335,3 +335,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
