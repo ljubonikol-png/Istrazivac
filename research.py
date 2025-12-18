@@ -2,6 +2,7 @@
 # Istrazivac Research Platform
 # External Storage via GitHub (FREE)
 # Streamlit Web Interface + Crawler
+# DEBUG VERZIJA
 # =============================================
 
 import os
@@ -43,7 +44,7 @@ os.makedirs(PAYLOAD_DIR, exist_ok=True)
 warnings.simplefilter("ignore", InsecureRequestWarning)
 
 # =============================================
-# GITHUB STORAGE ENGINE
+# GITHUB STORAGE ENGINE (ROBUST + DEBUG)
 # =============================================
 
 def gh_headers():
@@ -52,15 +53,29 @@ def gh_headers():
         "Accept": "application/vnd.github.v3+json"
     }
 
-
 def load_storage():
     url = f"{GITHUB_API}/repos/{st.secrets['GITHUB_REPO']}/contents/{STORAGE_PATH}"
     r = requests.get(url, headers=gh_headers())
-    r.raise_for_status()
-    data = r.json()
-    content = base64.b64decode(data["content"]).decode()
-    return json.loads(content), data["sha"]
+    
+    # DEBUG LINIJE
+    st.write("DEBUG: status code:", r.status_code)
+    st.write("DEBUG: response snippet:", r.text[:200])
 
+    if r.status_code == 404:
+        st.error("storage.json not found in repo (data/storage.json)")
+        st.stop()
+
+    if r.status_code == 401:
+        st.error("GitHub token invalid or missing repo access")
+        st.stop()
+
+    if r.status_code != 200:
+        st.error(f"GitHub API error: {r.status_code}")
+        st.stop()
+
+    data = r.json()
+    content = base64.b64decode(data["content"]).decode("utf-8")
+    return json.loads(content), data["sha"]
 
 def save_storage(storage, sha, message="Update storage"):
     url = f"{GITHUB_API}/repos/{st.secrets['GITHUB_REPO']}/contents/{STORAGE_PATH}"
@@ -70,7 +85,9 @@ def save_storage(storage, sha, message="Update storage"):
         "sha": sha
     }
     r = requests.put(url, headers=gh_headers(), json=payload)
-    r.raise_for_status()
+    if r.status_code not in (200, 201):
+        st.error(f"Failed to write storage.json ({r.status_code})")
+        st.stop()
 
 # =============================================
 # AUTH & USER TRACKING
@@ -78,36 +95,29 @@ def save_storage(storage, sha, message="Update storage"):
 
 def authenticate(username):
     storage, sha = load_storage()
-
-    if username not in storage["users"]:
-        storage["users"][username] = {
+    if username not in storage.get("users", {}):
+        storage.setdefault("users", {})[username] = {
             "role": "free",
             "created_at": str(datetime.utcnow()),
             "crawl_count": 0
         }
         save_storage(storage, sha, "Add new user")
-
     st.session_state.user = username
     st.session_state.role = storage["users"][username]["role"]
-
 
 def increment_crawl():
     storage, sha = load_storage()
     u = st.session_state.user
-
     storage["users"][u]["crawl_count"] += 1
     storage["stats"]["total_crawls"] += 1
-
     save_storage(storage, sha, "Increment crawl count")
-
 
 def can_crawl():
     storage, _ = load_storage()
     u = st.session_state.user
     role = storage["users"][u]["role"]
     count = storage["users"][u]["crawl_count"]
-
-    if role == "admin" or role == "premium":
+    if role in ("admin", "premium"):
         return True
     return count < 2
 
@@ -121,7 +131,6 @@ session.headers.update({"User-Agent": USER_AGENT})
 task_queue = queue.Queue()
 warc_lock = threading.Lock()
 
-
 def fetch(url):
     try:
         r = session.get(url, timeout=TIMEOUT, verify=False, allow_redirects=True)
@@ -129,33 +138,26 @@ def fetch(url):
     except Exception:
         return None, None
 
-
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
 
 def process_url(url, depth, max_depth, warc_writer):
     data, ctype = fetch(url)
     if not data:
         return
-
     h = sha256(data)
     with open(os.path.join(PAYLOAD_DIR, h), "wb") as f:
         f.write(data)
-
     with warc_lock:
         record = warc_writer.create_warc_record(url, "resource", payload=BytesIO(data))
         warc_writer.write_record(record)
-
     if depth >= max_depth or "html" not in (ctype or "").lower():
         return
-
     soup = BeautifulSoup(data, "lxml")
     for a in soup.find_all("a", href=True):
         link = urljoin(url, a["href"])
         if link.startswith("http"):
             task_queue.put((link, depth + 1))
-
 
 def worker(max_depth, warc_writer):
     while True:
@@ -168,21 +170,17 @@ def worker(max_depth, warc_writer):
         finally:
             task_queue.task_done()
 
-
 def run_crawler(seeds, max_depth):
     increment_crawl()
     with open(WARC_PATH, "ab") as wf:
         warc_writer = WARCWriter(wf, gzip=True)
-
         for u in seeds:
             task_queue.put((u, 0))
-
         threads = []
         for _ in range(THREADS):
             t = threading.Thread(target=worker, args=(max_depth, warc_writer), daemon=True)
             t.start()
             threads.append(t)
-
         task_queue.join()
 
 # =============================================
@@ -192,32 +190,31 @@ def run_crawler(seeds, max_depth):
 def main():
     st.set_page_config(page_title="GarbageMan Web Crawler")
     st.title("GarbageMan Web Crawler")
-
+    
     if "user" not in st.session_state:
         username = st.text_input("Username")
         if st.button("Login") and username:
             authenticate(username)
             st.experimental_rerun()
         return
-
+    
     st.success(f"Logged in as {st.session_state.user} ({st.session_state.role})")
-
+    
     if not can_crawl():
         st.error("Free limit reached. Contact admin for upgrade.")
         return
-
+    
     seed_url = st.text_input("Seed URL", SEED_URLS_DEFAULT[0])
     max_depth = st.slider("Max depth", 1, 5, MAX_DEPTH_DEFAULT)
-
+    
     if st.button("Start Crawl"):
         run_crawler([seed_url], max_depth)
         st.success("Crawl complete")
-
+    
     if st.session_state.role == "admin":
         st.subheader("Admin panel")
         storage, _ = load_storage()
         st.json(storage)
-
 
 if __name__ == "__main__":
     main()
