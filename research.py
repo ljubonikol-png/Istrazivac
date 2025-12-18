@@ -1,8 +1,7 @@
 # =============================================
 # Istrazivac Research Platform
-# External Storage via GitHub (FREE)
 # Streamlit Web Interface + Crawler
-# DEBUG VERZIJA
+# Finalna verzija
 # =============================================
 
 import os
@@ -44,7 +43,7 @@ os.makedirs(PAYLOAD_DIR, exist_ok=True)
 warnings.simplefilter("ignore", InsecureRequestWarning)
 
 # =============================================
-# GITHUB STORAGE ENGINE (ROBUST + DEBUG)
+# GITHUB STORAGE
 # =============================================
 
 def gh_headers():
@@ -56,23 +55,9 @@ def gh_headers():
 def load_storage():
     url = f"{GITHUB_API}/repos/{st.secrets['GITHUB_REPO']}/contents/{STORAGE_PATH}"
     r = requests.get(url, headers=gh_headers())
-    
-    # DEBUG LINIJE
-    st.write("DEBUG: status code:", r.status_code)
-    st.write("DEBUG: response snippet:", r.text[:200])
-
-    if r.status_code == 404:
-        st.error("storage.json not found in repo (data/storage.json)")
-        st.stop()
-
-    if r.status_code == 401:
-        st.error("GitHub token invalid or missing repo access")
-        st.stop()
-
     if r.status_code != 200:
-        st.error(f"GitHub API error: {r.status_code}")
+        st.error(f"GitHub API error: {r.status_code} - provjeri token i repo path")
         st.stop()
-
     data = r.json()
     content = base64.b64decode(data["content"]).decode("utf-8")
     return json.loads(content), data["sha"]
@@ -109,6 +94,7 @@ def increment_crawl():
     storage, sha = load_storage()
     u = st.session_state.user
     storage["users"][u]["crawl_count"] += 1
+    storage.setdefault("stats", {}).setdefault("total_crawls", 0)
     storage["stats"]["total_crawls"] += 1
     save_storage(storage, sha, "Increment crawl count")
 
@@ -191,30 +177,30 @@ def main():
     st.set_page_config(page_title="GarbageMan Web Crawler")
     st.title("GarbageMan Web Crawler")
     
+    # LOGIN
     if "user" not in st.session_state:
         username = st.text_input("Username")
         if st.button("Login") and username:
             authenticate(username)
-            st.experimental_rerun()
-        return
-    
-    st.success(f"Logged in as {st.session_state.user} ({st.session_state.role})")
-    
-    if not can_crawl():
-        st.error("Free limit reached. Contact admin for upgrade.")
-        return
-    
-    seed_url = st.text_input("Seed URL", SEED_URLS_DEFAULT[0])
-    max_depth = st.slider("Max depth", 1, 5, MAX_DEPTH_DEFAULT)
-    
-    if st.button("Start Crawl"):
-        run_crawler([seed_url], max_depth)
-        st.success("Crawl complete")
-    
-    if st.session_state.role == "admin":
-        st.subheader("Admin panel")
-        storage, _ = load_storage()
-        st.json(storage)
+
+    if "user" in st.session_state:
+        st.success(f"Logged in as {st.session_state.user} ({st.session_state.role})")
+        
+        if not can_crawl():
+            st.error("Free limit reached. Contact admin for upgrade.")
+            return
+        
+        seed_url = st.text_input("Seed URL", SEED_URLS_DEFAULT[0])
+        max_depth = st.slider("Max depth", 1, 5, MAX_DEPTH_DEFAULT)
+        
+        if st.button("Start Crawl"):
+            run_crawler([seed_url], max_depth)
+            st.success("Crawl complete")
+        
+        if st.session_state.role == "admin":
+            st.subheader("Admin panel")
+            storage, _ = load_storage()
+            st.json(storage)
 
 if __name__ == "__main__":
     main()
