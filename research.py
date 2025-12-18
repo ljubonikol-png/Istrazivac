@@ -1,101 +1,223 @@
-# ======= BYTE-TO-BYTE ispravljena research.py =======
-import os,time,threading,queue,hashlib,sqlite3,requests,warnings
+# =============================================
+# Istrazivac Research Platform
+# External Storage via GitHub (FREE)
+# Streamlit Web Interface + Crawler
+# =============================================
+
+import os
+import time
+import json
+import base64
+import queue
+import threading
+import hashlib
+import requests
+import warnings
+from datetime import datetime
 from urllib.parse import urljoin
+from io import BytesIO
+
+import streamlit as st
 from bs4 import BeautifulSoup
 from warcio.warcwriter import WARCWriter
-from io import BytesIO
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
-global ROOT, DB_PATH, WARC_PATH, PAYLOAD_DIR, SEED_URLS, MAX_DEPTH, THREADS, TIMEOUT, USER_AGENT
+# =============================================
+# CONFIG
+# =============================================
 
-ROOT = r'E:\GarbageMan'
-DB_PATH = os.path.join(ROOT,'data','crawler.db')
-WARC_PATH = os.path.join(ROOT,'data','archive.warc.gz')
-PAYLOAD_DIR = os.path.join(ROOT,'data','payloads')
-SEED_URLS = ['https://www.gov.rs/']
-MAX_DEPTH = 2
+ROOT = os.getcwd()
+PAYLOAD_DIR = os.path.join(ROOT, "payloads")
+WARC_PATH = os.path.join(ROOT, "archive.warc.gz")
+
+SEED_URLS_DEFAULT = ["https://www.gov.rs/"]
+MAX_DEPTH_DEFAULT = 2
 THREADS = 4
 TIMEOUT = 20
-USER_AGENT = 'GarbageMan/1.0 (archival crawler; TLS relaxed)'
+USER_AGENT = "GarbageMan/1.0 (archival crawler; TLS relaxed)"
 
-os.makedirs(PAYLOAD_DIR,exist_ok=True)
+GITHUB_API = "https://api.github.com"
+STORAGE_PATH = "data/storage.json"
 
-def log(msg): print(time.strftime('[%H:%M:%S]'),msg,flush=True)
-def init_db(): conn=sqlite3.connect(DB_PATH);c=conn.cursor();c.execute("PRAGMA journal_mode=WAL;");c.execute("CREATE TABLE IF NOT EXISTS seen (url TEXT PRIMARY KEY,hash TEXT)");conn.commit();conn.close()
-def db_connection(): conn=sqlite3.connect(DB_PATH,check_same_thread=False);conn.execute("PRAGMA journal_mode=WAL;");return conn
+os.makedirs(PAYLOAD_DIR, exist_ok=True)
+warnings.simplefilter("ignore", InsecureRequestWarning)
 
-USERS_DB_PATH=os.path.join(ROOT,'data','users.db')
-def init_users_db():
-    global USERS_DB_PATH
-    conn=sqlite3.connect(USERS_DB_PATH)
-    c=conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY,password TEXT,role TEXT,crawl_count INTEGER DEFAULT 0,created_at TEXT)")
-    import time
-    default_users=[("admin","MiraAndjaDiki.,.,1234567890,.,.","admin"),("freeuser","freepass","free"),("premiumuser","1234","premium")]
-    for u,p,r in default_users:
-        c.execute("SELECT 1 FROM users WHERE username=?",(u,))
-        if not c.fetchone():
-            c.execute("INSERT INTO users (username,password,role,crawl_count,created_at) VALUES (?,?,?,?,?)",(u,p,r,0,time.ctime()))
-    conn.commit()
-    conn.close()
+# =============================================
+# GITHUB STORAGE ENGINE
+# =============================================
 
-warnings.simplefilter("ignore",InsecureRequestWarning)
-session=requests.Session()
-session.headers.update({"User-Agent":USER_AGENT})
+def gh_headers():
+    return {
+        "Authorization": f"token {st.secrets['GITHUB_TOKEN']}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+
+def load_storage():
+    url = f"{GITHUB_API}/repos/{st.secrets['GITHUB_REPO']}/contents/{STORAGE_PATH}"
+    r = requests.get(url, headers=gh_headers())
+    r.raise_for_status()
+    data = r.json()
+    content = base64.b64decode(data["content"]).decode()
+    return json.loads(content), data["sha"]
+
+
+def save_storage(storage, sha, message="Update storage"):
+    url = f"{GITHUB_API}/repos/{st.secrets['GITHUB_REPO']}/contents/{STORAGE_PATH}"
+    payload = {
+        "message": message,
+        "content": base64.b64encode(json.dumps(storage, indent=2).encode()).decode(),
+        "sha": sha
+    }
+    r = requests.put(url, headers=gh_headers(), json=payload)
+    r.raise_for_status()
+
+# =============================================
+# AUTH & USER TRACKING
+# =============================================
+
+def authenticate(username):
+    storage, sha = load_storage()
+
+    if username not in storage["users"]:
+        storage["users"][username] = {
+            "role": "free",
+            "created_at": str(datetime.utcnow()),
+            "crawl_count": 0
+        }
+        save_storage(storage, sha, "Add new user")
+
+    st.session_state.user = username
+    st.session_state.role = storage["users"][username]["role"]
+
+
+def increment_crawl():
+    storage, sha = load_storage()
+    u = st.session_state.user
+
+    storage["users"][u]["crawl_count"] += 1
+    storage["stats"]["total_crawls"] += 1
+
+    save_storage(storage, sha, "Increment crawl count")
+
+
+def can_crawl():
+    storage, _ = load_storage()
+    u = st.session_state.user
+    role = storage["users"][u]["role"]
+    count = storage["users"][u]["crawl_count"]
+
+    if role == "admin" or role == "premium":
+        return True
+    return count < 2
+
+# =============================================
+# CRAWLER CORE
+# =============================================
+
+session = requests.Session()
+session.headers.update({"User-Agent": USER_AGENT})
+
+task_queue = queue.Queue()
+warc_lock = threading.Lock()
+
+
 def fetch(url):
-    try: r=session.get(url,timeout=TIMEOUT,verify=False,allow_redirects=True); return r.content,r.headers.get("Content-Type","")
-    except Exception as e: log(f"fetch error {url} : {e}"); return None,None
-def sha256(data:bytes)->str: return hashlib.sha256(data).hexdigest()
-warc_lock=threading.Lock()
-warc_file=open(WARC_PATH,"ab")
-warc_writer=WARCWriter(warc_file,gzip=True)
-def write_warc(url,payload:bytes):
+    try:
+        r = session.get(url, timeout=TIMEOUT, verify=False, allow_redirects=True)
+        return r.content, r.headers.get("Content-Type", "")
+    except Exception:
+        return None, None
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def process_url(url, depth, max_depth, warc_writer):
+    data, ctype = fetch(url)
+    if not data:
+        return
+
+    h = sha256(data)
+    with open(os.path.join(PAYLOAD_DIR, h), "wb") as f:
+        f.write(data)
+
     with warc_lock:
-        record=warc_writer.create_warc_record(url,record_type="resource",payload=BytesIO(payload))
+        record = warc_writer.create_warc_record(url, "resource", payload=BytesIO(data))
         warc_writer.write_record(record)
 
-task_queue=queue.Queue()
-seen_lock=threading.Lock()
+    if depth >= max_depth or "html" not in (ctype or "").lower():
+        return
 
-def process_url(url,depth,conn):
-    global MAX_DEPTH
-    c=conn.cursor()
-    c.execute("SELECT 1 FROM seen WHERE url=?",(url,))
-    if c.fetchone(): return
-    log(f"fetching d={depth} {url}")
-    data,ctype=fetch(url)
-    if not data: return
-    h=sha256(data)
-    with seen_lock: c.execute("INSERT OR IGNORE INTO seen(url,hash) VALUES (?,?)",(url,h));conn.commit()
-    with open(os.path.join(PAYLOAD_DIR,h),"wb") as f: f.write(data)
-    write_warc(url,data)
-    if depth>=MAX_DEPTH: return
-    if "html" not in (ctype or "").lower(): return
-    try: soup=BeautifulSoup(data,"lxml");[task_queue.put((urljoin(url,a['href']),depth+1)) for a in soup.find_all('a',href=True) if urljoin(url,a['href']).startswith("http")]
-    except Exception as e: log(f"parse error {url} : {e}")
+    soup = BeautifulSoup(data, "lxml")
+    for a in soup.find_all("a", href=True):
+        link = urljoin(url, a["href"])
+        if link.startswith("http"):
+            task_queue.put((link, depth + 1))
 
-def worker():
-    conn=db_connection()
+
+def worker(max_depth, warc_writer):
     while True:
-        try: url,depth=task_queue.get(timeout=3)
-        except queue.Empty: break
-        try: process_url(url,depth,conn)
-        finally: task_queue.task_done()
-    conn.close()
+        try:
+            url, depth = task_queue.get(timeout=2)
+        except queue.Empty:
+            break
+        try:
+            process_url(url, depth, max_depth, warc_writer)
+        finally:
+            task_queue.task_done()
+
+
+def run_crawler(seeds, max_depth):
+    increment_crawl()
+    with open(WARC_PATH, "ab") as wf:
+        warc_writer = WARCWriter(wf, gzip=True)
+
+        for u in seeds:
+            task_queue.put((u, 0))
+
+        threads = []
+        for _ in range(THREADS):
+            t = threading.Thread(target=worker, args=(max_depth, warc_writer), daemon=True)
+            t.start()
+            threads.append(t)
+
+        task_queue.join()
+
+# =============================================
+# STREAMLIT UI
+# =============================================
 
 def main():
-    log("initializing database")
-    init_db()
-    log("initializing users database")
-    init_users_db()
-    log("seeding crawl")
-    [task_queue.put((u,0)) for u in SEED_URLS]
-    log("starting workers")
-    threads=[threading.Thread(target=worker,daemon=True) for _ in range(THREADS)]
-    [t.start() for t in threads]
-    task_queue.join()
-    warc_file.close()
-    log("crawl complete")
+    st.set_page_config(page_title="GarbageMan Web Crawler")
+    st.title("GarbageMan Web Crawler")
 
-if __name__=="__main__":
+    if "user" not in st.session_state:
+        username = st.text_input("Username")
+        if st.button("Login") and username:
+            authenticate(username)
+            st.experimental_rerun()
+        return
+
+    st.success(f"Logged in as {st.session_state.user} ({st.session_state.role})")
+
+    if not can_crawl():
+        st.error("Free limit reached. Contact admin for upgrade.")
+        return
+
+    seed_url = st.text_input("Seed URL", SEED_URLS_DEFAULT[0])
+    max_depth = st.slider("Max depth", 1, 5, MAX_DEPTH_DEFAULT)
+
+    if st.button("Start Crawl"):
+        run_crawler([seed_url], max_depth)
+        st.success("Crawl complete")
+
+    if st.session_state.role == "admin":
+        st.subheader("Admin panel")
+        storage, _ = load_storage()
+        st.json(storage)
+
+
+if __name__ == "__main__":
     main()
