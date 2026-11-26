@@ -108,68 +108,112 @@ def can_crawl():
     return count < 2
 
 # =============================================
+# =============================================
 # CRAWLER CORE
 # =============================================
 
 session = requests.Session()
 session.headers.update({"User-Agent": USER_AGENT})
-
 task_queue = queue.Queue()
 warc_lock = threading.Lock()
+visited_lock = threading.Lock()
+visited_urls = set()
+MAX_PAGES_DEFAULT = 100
+
+
+def normalize_url(url):
+    try:
+        parsed = requests.utils.urlparse(url.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return None
+        if parsed.username or parsed.password:
+            return None
+        normalized = parsed._replace(fragment="", netloc=parsed.netloc.lower())
+        return requests.utils.urlunparse(normalized)
+    except Exception:
+        return None
+
+
+def enqueue_url(url, depth, max_pages):
+    normalized = normalize_url(url)
+    if not normalized:
+        return False
+    with visited_lock:
+        if normalized in visited_urls or len(visited_urls) >= max_pages:
+            return False
+        visited_urls.add(normalized)
+        task_queue.put((normalized, depth))
+    return True
+
 
 def fetch(url):
     try:
-        r = session.get(url, timeout=TIMEOUT, verify=False, allow_redirects=True)
-        return r.content, r.headers.get("Content-Type", "")
-    except Exception:
+        response = requests.get(url, timeout=TIMEOUT, verify=True, allow_redirects=True, headers={"User-Agent": USER_AGENT})
+        response.raise_for_status()
+        return response.content, response.headers.get("Content-Type", "")
+    except requests.RequestException:
         return None, None
+
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
-def process_url(url, depth, max_depth, warc_writer):
+
+
+def process_url(url, depth, max_depth, max_pages, warc_writer):
     data, ctype = fetch(url)
     if not data:
         return
     h = sha256(data)
-    with open(os.path.join(PAYLOAD_DIR, h), "wb") as f:
-        f.write(data)
+    payload_path = os.path.join(PAYLOAD_DIR, h)
+    if not os.path.exists(payload_path):
+        with open(payload_path, "wb") as f:
+            f.write(data)
     with warc_lock:
         record = warc_writer.create_warc_record(url, "resource", payload=BytesIO(data))
         warc_writer.write_record(record)
     if depth >= max_depth or "html" not in (ctype or "").lower():
         return
     soup = BeautifulSoup(data, "lxml")
-    for a in soup.find_all("a", href=True):
-        link = urljoin(url, a["href"])
-        if link.startswith("http"):
-            task_queue.put((link, depth + 1))
+    for anchor in soup.find_all("a", href=True):
+        link = urljoin(url, anchor["href"])
+        enqueue_url(link, depth + 1, max_pages)
 
-def worker(max_depth, warc_writer):
+
+def worker(max_depth, max_pages, warc_writer):
     while True:
         try:
             url, depth = task_queue.get(timeout=2)
         except queue.Empty:
             break
         try:
-            process_url(url, depth, max_depth, warc_writer)
+            process_url(url, depth, max_depth, max_pages, warc_writer)
         finally:
             task_queue.task_done()
 
-def run_crawler(seeds, max_depth):
+
+def run_crawler(seeds, max_depth, max_pages=MAX_PAGES_DEFAULT):
     increment_crawl()
+    with visited_lock:
+        visited_urls.clear()
+    while not task_queue.empty():
+        try:
+            task_queue.get_nowait()
+            task_queue.task_done()
+        except queue.Empty:
+            break
     with open(WARC_PATH, "ab") as wf:
         warc_writer = WARCWriter(wf, gzip=True)
-        for u in seeds:
-            task_queue.put((u, 0))
+        for seed in seeds:
+            enqueue_url(seed, 0, max_pages)
         threads = []
-        for _ in range(THREADS):
-            t = threading.Thread(target=worker, args=(max_depth, warc_writer), daemon=True)
+        for _ in range(min(THREADS, max_pages)):
+            t = threading.Thread(target=worker, args=(max_depth, max_pages, warc_writer), daemon=True)
             t.start()
             threads.append(t)
         task_queue.join()
-
-# =============================================
+        for t in threads:
+            t.join(timeout=3)
 # STREAMLIT UI
 # =============================================
 
