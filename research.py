@@ -13,6 +13,8 @@ import threading
 import hashlib
 import requests
 import warnings
+import socket
+import ipaddress
 from datetime import datetime
 from urllib.parse import urljoin
 from io import BytesIO
