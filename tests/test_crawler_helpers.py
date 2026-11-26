@@ -19,6 +19,14 @@ class CrawlerHelperTests(unittest.TestCase):
     def test_normalize_rejects_embedded_credentials(self):
         self.assertIsNone(research.normalize_url("https://user:pass@example.com"))
 
+    def test_public_host_rejects_private_ip(self):
+        with unittest.mock.patch.object(research.socket, "getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 0))]):
+            self.assertFalse(research.is_public_host("localhost"))
+
+    def test_public_host_accepts_public_ip(self):
+        with unittest.mock.patch.object(research.socket, "getaddrinfo", return_value=[(None, None, None, None, ("8.8.8.8", 0))]):
+            self.assertTrue(research.is_public_host("dns.google"))
+
     def test_queue_deduplicates_and_respects_cap(self):
         self.assertTrue(research.enqueue_url("https://example.com/a", 0, 2))
         self.assertFalse(research.enqueue_url("https://example.com/a#fragment", 1, 2))
