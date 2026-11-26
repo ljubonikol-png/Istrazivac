@@ -73,6 +73,8 @@ warc_lock = threading.Lock()
 visited_lock = threading.Lock()
 visited_urls = set()
 MAX_PAGES_DEFAULT = 100
+MAX_RESPONSE_BYTES = 25 * 1024 * 1024
+DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
 
 def normalize_url(url):
@@ -126,17 +128,36 @@ def fetch(url):
         if not host or not is_public_host(host):
             return None, None
         try:
-            response = requests.get(current, timeout=TIMEOUT, verify=True, allow_redirects=False, headers={"User-Agent": USER_AGENT})
-            if response.is_redirect:
-                location = response.headers.get("Location")
-                if not location:
-                    return None, None
-                current = normalize_url(urljoin(current, location))
-                if not current:
-                    return None, None
-                continue
-            response.raise_for_status()
-            return response.content, response.headers.get("Content-Type", "")
+            response = requests.get(current, timeout=TIMEOUT, verify=True, allow_redirects=False, headers={"User-Agent": USER_AGENT}, stream=True)
+            try:
+                if response.is_redirect:
+                    location = response.headers.get("Location")
+                    if not location:
+                        return None, None
+                    current = normalize_url(urljoin(current, location))
+                    if not current:
+                        return None, None
+                    continue
+                response.raise_for_status()
+                declared_length = response.headers.get("Content-Length")
+                if declared_length:
+                    try:
+                        if int(declared_length) > MAX_RESPONSE_BYTES:
+                            return None, None
+                    except ValueError:
+                        return None, None
+                chunks = []
+                total = 0
+                for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_BYTES):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > MAX_RESPONSE_BYTES:
+                        return None, None
+                    chunks.append(chunk)
+                return b"".join(chunks), response.headers.get("Content-Type", "")
+            finally:
+                response.close()
         except requests.RequestException:
             return None, None
     return None, None
