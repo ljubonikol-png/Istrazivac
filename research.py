@@ -193,7 +193,6 @@ def worker(max_depth, max_pages, warc_writer):
 
 
 def run_crawler(seeds, max_depth, max_pages=MAX_PAGES_DEFAULT):
-    increment_crawl()
     with visited_lock:
         visited_urls.clear()
     while not task_queue.empty():
@@ -230,10 +229,7 @@ def main():
     if "user" in st.session_state:
         st.success(f"Logged in as {st.session_state.user} ({st.session_state.role})")
         
-        if not can_crawl():
-            st.error("Free limit reached. Contact admin for upgrade.")
-            return
-        
+
         seed_url = st.text_input("Seed URL", SEED_URLS_DEFAULT[0])
         max_depth = st.slider("Max depth", 1, 5, MAX_DEPTH_DEFAULT)
         
@@ -241,10 +237,6 @@ def main():
             run_crawler([seed_url], max_depth)
             st.success("Crawl complete")
         
-        if st.session_state.role == "admin":
-            st.subheader("Admin panel")
-            storage, _ = load_storage()
-            st.json(storage)
 
 if __name__ == "__main__":
     main()
