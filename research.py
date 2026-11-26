@@ -20,7 +20,7 @@ from io import BytesIO
 import streamlit as st
 from bs4 import BeautifulSoup
 from warcio.warcwriter import WARCWriter
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
 
 # =============================================
 # CONFIG
@@ -34,81 +34,33 @@ SEED_URLS_DEFAULT = ["https://www.gov.rs/"]
 MAX_DEPTH_DEFAULT = 2
 THREADS = 4
 TIMEOUT = 20
-USER_AGENT = "GarbageMan/1.0 (archival crawler; TLS relaxed)"
+USER_AGENT = "GarbageMan/1.0 (archival crawler; TLS verified)"
 
 GITHUB_API = "https://api.github.com"
 STORAGE_PATH = "data/storage.json"
 
 os.makedirs(PAYLOAD_DIR, exist_ok=True)
-warnings.simplefilter("ignore", InsecureRequestWarning)
 
-# =============================================
-# GITHUB STORAGE
-# =============================================
-
-def gh_headers():
-    return {
-        "Authorization": f"token {st.secrets['GITHUB_TOKEN']}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-
-def load_storage():
-    url = f"{GITHUB_API}/repos/{st.secrets['GITHUB_REPO']}/contents/{STORAGE_PATH}"
-    r = requests.get(url, headers=gh_headers())
-    if r.status_code != 200:
-        st.error(f"GitHub API error: {r.status_code} - provjeri token i repo path")
-        st.stop()
-    data = r.json()
-    content = base64.b64decode(data["content"]).decode("utf-8")
-    return json.loads(content), data["sha"]
-
-def save_storage(storage, sha, message="Update storage"):
-    url = f"{GITHUB_API}/repos/{st.secrets['GITHUB_REPO']}/contents/{STORAGE_PATH}"
-    payload = {
-        "message": message,
-        "content": base64.b64encode(json.dumps(storage, indent=2).encode()).decode(),
-        "sha": sha
-    }
-    r = requests.put(url, headers=gh_headers(), json=payload)
-    if r.status_code not in (200, 201):
-        st.error(f"Failed to write storage.json ({r.status_code})")
-        st.stop()
-
-# =============================================
-# AUTH & USER TRACKING
-# =============================================
-
-def authenticate(username):
-    storage, sha = load_storage()
-    if username not in storage.get("users", {}):
-        storage.setdefault("users", {})[username] = {
-            "role": "free",
-            "created_at": str(datetime.utcnow()),
-            "crawl_count": 0
-        }
-        save_storage(storage, sha, "Add new user")
-    st.session_state.user = username
-    st.session_state.role = storage["users"][username]["role"]
-
-def increment_crawl():
-    storage, sha = load_storage()
-    u = st.session_state.user
-    storage["users"][u]["crawl_count"] += 1
-    storage.setdefault("stats", {}).setdefault("total_crawls", 0)
-    storage["stats"]["total_crawls"] += 1
-    save_storage(storage, sha, "Increment crawl count")
-
-def can_crawl():
-    storage, _ = load_storage()
-    u = st.session_state.user
-    role = storage["users"][u]["role"]
-    count = storage["users"][u]["crawl_count"]
-    if role in ("admin", "premium"):
-        return True
-    return count < 2
 
 # =============================================
 # =============================================
+# AUTHENTICATION
+# =============================================
+
+def authenticate(password):
+    expected = os.environ.get("ISTRAZIVAC_ADMIN_PASSWORD", "")
+    if not expected or len(expected) < 16:
+        st.error("Admin authentication is not configured (password minimum 16 characters).")
+        return False
+    import hmac
+    if not hmac.compare_digest(password, expected):
+        st.error("Invalid password.")
+        return False
+    st.session_state.user = "admin"
+    st.session_state.role = "admin"
+    return True
+
+
 # CRAWLER CORE
 # =============================================
 
@@ -124,14 +76,31 @@ MAX_PAGES_DEFAULT = 100
 def normalize_url(url):
     try:
         parsed = requests.utils.urlparse(url.strip())
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
             return None
-        if parsed.username or parsed.password:
+        if parsed.port not in (None, 80, 443):
             return None
-        normalized = parsed._replace(fragment="", netloc=parsed.netloc.lower())
+        host = parsed.hostname.rstrip(".").lower()
+        if not host:
+            return None
+        normalized = parsed._replace(fragment="", netloc=host if parsed.port is None else f"{host}:{parsed.port}")
         return requests.utils.urlunparse(normalized)
-    except Exception:
+    except (ValueError, AttributeError):
         return None
+
+
+def is_public_host(hostname):
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)}
+        if not addresses:
+            return False
+        for address in addresses:
+            ip = ipaddress.ip_address(address.split("%", 1)[0])
+            if not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def enqueue_url(url, depth, max_pages):
@@ -147,12 +116,28 @@ def enqueue_url(url, depth, max_pages):
 
 
 def fetch(url):
-    try:
-        response = requests.get(url, timeout=TIMEOUT, verify=True, allow_redirects=True, headers={"User-Agent": USER_AGENT})
-        response.raise_for_status()
-        return response.content, response.headers.get("Content-Type", "")
-    except requests.RequestException:
+    current = normalize_url(url)
+    if not current:
         return None, None
+    for _ in range(6):
+        host = requests.utils.urlparse(current).hostname
+        if not host or not is_public_host(host):
+            return None, None
+        try:
+            response = requests.get(current, timeout=TIMEOUT, verify=True, allow_redirects=False, headers={"User-Agent": USER_AGENT})
+            if response.is_redirect:
+                location = response.headers.get("Location")
+                if not location:
+                    return None, None
+                current = normalize_url(urljoin(current, location))
+                if not current:
+                    return None, None
+                continue
+            response.raise_for_status()
+            return response.content, response.headers.get("Content-Type", "")
+        except requests.RequestException:
+            return None, None
+    return None, None
 
 
 def sha256(data: bytes) -> str:
@@ -220,16 +205,15 @@ def main():
     st.set_page_config(page_title="GarbageMan Web Crawler")
     st.title("GarbageMan Web Crawler")
     
-    # LOGIN
+    # Admin-only password authentication; no username-only access.
     if "user" not in st.session_state:
-        username = st.text_input("Username")
-        if st.button("Login") and username:
-            authenticate(username)
+        password = st.text_input("Admin password", type="password")
+        if st.button("Login") and password:
+            authenticate(password)
 
     if "user" in st.session_state:
         st.success(f"Logged in as {st.session_state.user} ({st.session_state.role})")
         
-
         seed_url = st.text_input("Seed URL", SEED_URLS_DEFAULT[0])
         max_depth = st.slider("Max depth", 1, 5, MAX_DEPTH_DEFAULT)
         
