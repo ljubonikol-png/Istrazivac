@@ -1,0 +1,7 @@
+.streamlit/secrets.toml
+.streamlit/secrets.*.toml
+.env
+.env.*
+!.env.example
+*.key
+*.pem
