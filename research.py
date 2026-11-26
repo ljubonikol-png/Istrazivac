@@ -216,10 +216,14 @@ def main():
         
         seed_url = st.text_input("Seed URL", SEED_URLS_DEFAULT[0])
         max_depth = st.slider("Max depth", 1, 5, MAX_DEPTH_DEFAULT)
+        max_pages = st.slider("Maximum pages", 10, 500, MAX_PAGES_DEFAULT, step=10)
         
         if st.button("Start Crawl"):
-            run_crawler([seed_url], max_depth)
-            st.success("Crawl complete")
+            if not normalize_url(seed_url):
+                st.error("Seed URL must be a valid HTTP/HTTPS URL without embedded credentials.")
+            else:
+                run_crawler([seed_url], max_depth, max_pages)
+                st.success("Crawl complete")
         
 
 if __name__ == "__main__":
