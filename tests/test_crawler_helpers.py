@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import research
 
@@ -20,7 +21,7 @@ class CrawlerHelperTests(unittest.TestCase):
         self.assertIsNone(research.normalize_url("https://user:pass@example.com"))
 
     def test_public_host_rejects_private_ip(self):
-        with unittest.mock.patch.object(research.socket, "getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 0))]):
+        with mock.patch.object(research.socket, "getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 0))]):
             self.assertFalse(research.is_public_host("localhost"))
 
     def test_public_host_accepts_public_ip(self):
