@@ -82,12 +82,12 @@ def normalize_url(url):
         parsed = requests.utils.urlparse(url.strip())
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
             return None
-        if parsed.port not in (None, 80, 443):
+        if parsed.port is not None and parsed.port != (80 if parsed.scheme == "http" else 443):
             return None
         host = parsed.hostname.rstrip(".").lower()
         if not host:
             return None
-        normalized = parsed._replace(fragment="", netloc=host if parsed.port is None else f"{host}:{parsed.port}")
+        normalized = parsed._replace(fragment="", netloc=host)
         return requests.utils.urlunparse(normalized)
     except (ValueError, AttributeError):
         return None
