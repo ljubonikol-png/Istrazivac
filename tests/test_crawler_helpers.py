@@ -43,7 +43,7 @@ class CrawlerHelperTests(unittest.TestCase):
         redirect.is_redirect = True
         redirect.headers = {"Location": "http://127.0.0.1/private"}
         redirect.close = mock.Mock()
-        with mock.patch.object(research, "is_public_host", side_effect=[True, False]), \
+        with mock.patch.object(research, "is_public_host", side_effect=lambda host: host != "127.0.0.1"), \
              mock.patch.object(research.requests, "get", return_value=redirect) as get:
             data, content_type = research.fetch("https://example.com/start")
         self.assertIsNone(data)
