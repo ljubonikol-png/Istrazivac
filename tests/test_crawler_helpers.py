@@ -68,6 +68,14 @@ class CrawlerHelperTests(unittest.TestCase):
         response.close.assert_called_once()
 
 
+    def test_normalize_strips_matching_default_port(self):
+        self.assertEqual(research.normalize_url("http://Example.com:80/a"), "http://example.com/a")
+        self.assertEqual(research.normalize_url("https://Example.com:443/a"), "https://example.com/a")
+
+    def test_normalize_rejects_wrong_scheme_port_pair(self):
+        self.assertIsNone(research.normalize_url("http://example.com:443/a"))
+        self.assertIsNone(research.normalize_url("https://example.com:80/a"))
+
 
 if __name__ == "__main__":
     unittest.main()
