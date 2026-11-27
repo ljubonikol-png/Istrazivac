@@ -10,4 +10,4 @@ A previously tracked Streamlit secrets file contained a GitHub token. The file h
 
 ## Crawler
 
-The crawler validates HTTP/HTTPS seed URLs, rejects embedded credentials, verifies TLS, deduplicates URLs, and limits each crawl to 100 pages by default. Review and enforce network egress restrictions before exposing the crawler publicly; URL validation alone is not an SSRF defense.
+The crawler validates HTTP/HTTPS seed URLs, rejects embedded credentials, verifies TLS, deduplicates URLs, and limits each crawl to 100 pages by default. Review and enforce network egress restrictions before exposing the crawler publicly; URL validation alone is not an SSRF defense. The current public-IP check performs DNS resolution before the HTTP client opens its socket; this leaves a DNS-rebinding/TOCTOU gap because the connection is not pinned to the validated address. Redirects are disabled in the HTTP client and each redirect destination is normalized and revalidated, but socket-level IP pinning is not yet implemented. Response bodies are streamed and capped at 25 MiB per response.
