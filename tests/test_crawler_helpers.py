@@ -38,6 +38,36 @@ class CrawlerHelperTests(unittest.TestCase):
             research.task_queue.get_nowait()
             research.task_queue.task_done()
 
+    def test_fetch_revalidates_redirect_target_and_does_not_follow_automatically(self):
+        redirect = mock.Mock()
+        redirect.is_redirect = True
+        redirect.headers = {"Location": "http://127.0.0.1/private"}
+        redirect.close = mock.Mock()
+        with mock.patch.object(research, "is_public_host", return_value=True), \
+             mock.patch.object(research.requests, "get", return_value=redirect) as get:
+            data, content_type = research.fetch("https://example.com/start")
+        self.assertIsNone(data)
+        self.assertIsNone(content_type)
+        get.assert_called_once()
+        self.assertFalse(get.call_args.kwargs["allow_redirects"])
+        redirect.close.assert_called_once()
+
+
+    def test_fetch_rejects_declared_oversize_and_closes_response(self):
+        response = mock.Mock()
+        response.is_redirect = False
+        response.headers = {"Content-Length": str(research.MAX_RESPONSE_BYTES + 1)}
+        response.raise_for_status = mock.Mock()
+        response.close = mock.Mock()
+        with mock.patch.object(research, "is_public_host", return_value=True), \
+             mock.patch.object(research.requests, "get", return_value=response):
+            data, content_type = research.fetch("https://example.com/large")
+        self.assertIsNone(data)
+        self.assertIsNone(content_type)
+        response.raise_for_status.assert_called_once()
+        response.close.assert_called_once()
+
+
 
 if __name__ == "__main__":
     unittest.main()
