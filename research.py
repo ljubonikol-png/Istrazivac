@@ -87,7 +87,9 @@ def normalize_url(url):
         host = parsed.hostname.rstrip(".").lower()
         if not host:
             return None
-        normalized = parsed._replace(fragment="", netloc=host)
+        # Preserve valid IPv6 authority syntax when normalizing hostnames.
+        authority_host = f"[{host}]" if ":" in host else host
+        normalized = parsed._replace(fragment="", netloc=authority_host)
         return requests.utils.urlunparse(normalized)
     except (ValueError, AttributeError):
         return None
