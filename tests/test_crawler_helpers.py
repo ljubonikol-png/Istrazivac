@@ -38,6 +38,19 @@ class CrawlerHelperTests(unittest.TestCase):
             research.task_queue.get_nowait()
             research.task_queue.task_done()
 
+    def test_fetch_stops_after_redirect_limit_and_closes_responses(self):
+        redirect = mock.Mock()
+        redirect.is_redirect = True
+        redirect.headers = {"Location": "/next"}
+        redirect.close = mock.Mock()
+        with mock.patch.object(research, "is_public_host", return_value=True), \
+             mock.patch.object(research.requests, "get", return_value=redirect) as get:
+            data, content_type = research.fetch("https://example.com/start")
+        self.assertIsNone(data)
+        self.assertIsNone(content_type)
+        self.assertEqual(get.call_count, 6)
+        self.assertEqual(redirect.close.call_count, 6)
+
     def test_fetch_revalidates_redirect_target_and_does_not_follow_automatically(self):
         redirect = mock.Mock()
         redirect.is_redirect = True
